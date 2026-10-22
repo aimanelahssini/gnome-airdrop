@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=AirDrop
+GenericName=Share with iPhones
+Comment=Turn AirDrop on or off (also in Quick Settings). Wi-Fi pauses while it's on.
+Exec=gdbus call --session --dest org.gnome.Shell --object-path /io/github/aimanelahssini/AirDrop --method io.github.aimanelahssini.AirDrop.Toggle
+Icon=airdrop
+Terminal=false
+Categories=Network;FileTransfer;
+Keywords=airdrop;iphone;apple;share;send;receive;
+Actions=send;
+
+[Desktop Action send]
+Name=Send Files…
+Exec=gdbus call --session --dest org.gnome.Shell --object-path /io/github/aimanelahssini/AirDrop --method io.github.aimanelahssini.AirDrop.ChooseAndSend

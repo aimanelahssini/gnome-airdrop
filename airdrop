@@ -1,0 +1,69 @@
+#!/bin/bash
+# AirDrop with iPhones, through Owly (https://github.com/t4t5/owly).
+#   airdrop                receive into Downloads until you stop it (Ctrl+C or close the window)
+#   airdrop send FILE...   send files to a nearby iPhone
+#   airdrop link URL       send a link
+# Wi-Fi is off while the AirDrop radio is on, and comes back when it stops.
+# The name iPhones see: ~/.config/airdrop/name (default "ThinkPad").
+set -u
+NAME_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/airdrop/name"
+NAME=$(cat "$NAME_FILE" 2>/dev/null || echo ThinkPad)
+DOWNLOADS=$(xdg-user-dir DOWNLOAD 2>/dev/null || echo "$HOME/Downloads")
+
+command -v owly >/dev/null || { echo "Owly isn't installed (see github.com/t4t5/owly)."; exit 1; }
+
+RADIO=
+stop_radio() {
+    [ -n "$RADIO" ] && kill -INT "$RADIO" 2>/dev/null && wait "$RADIO" 2>/dev/null
+    RADIO=
+    echo "AirDrop off, Wi-Fi coming back."
+}
+start_radio() {
+    echo "Turning on AirDrop (Wi-Fi pauses meanwhile)..."
+    owly radio up --for 600 >/dev/null 2>&1 &   # owlyd gives Wi-Fi back after 10 min no matter what
+    RADIO=$!
+    trap stop_radio EXIT
+    trap 'exit 130' INT TERM HUP
+    for _ in $(seq 1 30); do
+        ip link show awdl0 >/dev/null 2>&1 && return 0
+        kill -0 "$RADIO" 2>/dev/null || break
+        sleep 0.5
+    done
+    echo "The AirDrop radio didn't start. Run: owly doctor"
+    exit 1
+}
+pick_receiver() {
+    echo "Looking for nearby iPhones (set AirDrop to \"Everyone for 10 minutes\")..."
+    owly browse --name "$NAME" --seconds 8
+    read -r -p "Send to (type the name, or Enter for the first one found): " TO
+}
+
+case "${1:-receive}" in
+    receive)
+        start_radio
+        echo "Ready: \"$NAME\" now shows up in AirDrop on nearby iPhones."
+        echo "On the iPhone, set AirDrop to \"Everyone for 10 minutes\". Files go to $DOWNLOADS."
+        echo "Close this window or press Ctrl+C to stop."
+        owly receive --name "$NAME" --dir "$DOWNLOADS"
+        ;;
+    send)
+        shift
+        [ $# -gt 0 ] || { echo "Usage: airdrop send FILE..."; exit 2; }
+        start_radio
+        pick_receiver
+        owly send --name "$NAME" ${TO:+--to "$TO"} "$@"
+        ;;
+    link)
+        shift
+        [ $# -eq 1 ] || { echo "Usage: airdrop link URL"; exit 2; }
+        start_radio
+        pick_receiver
+        owly send --name "$NAME" ${TO:+--to "$TO"} --url "$1"
+        ;;
+    -h|--help|help)
+        sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'
+        ;;
+    *)
+        echo "Unknown: $1 (try: airdrop help)"; exit 2
+        ;;
+esac

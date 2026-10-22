@@ -1,0 +1,6 @@
+{
+  "uuid": "airdrop@aimanelahssini",
+  "name": "AirDrop",
+  "description": "AirDrop with iPhones from Quick Settings, through Owly: receive with Accept/Decline notifications, send files to a nearby iPhone.",
+  "shell-version": ["50"]
+}
