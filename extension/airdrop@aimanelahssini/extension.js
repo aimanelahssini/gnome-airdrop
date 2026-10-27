@@ -19,8 +19,11 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 const ON_MINUTES = 10;          // AirDrop turns itself off (and Wi-Fi comes back) after this
 const ASK_SECONDS = 14;         // Owly declines by itself after 15 s
 const DONE_SECONDS = 15;        // after a transfer, turn off (Wi-Fi back) unless another one starts
+const SEND_LINGER_SECONDS = 30; // after a send, keep the radio up this long for the next one:
+                                // an iPhone that just saw it go away is slow to answer again
 const WIFI_CHECK_SECONDS = 8;   // after the radio stops, make sure Wi-Fi reconnected
-const BROWSE_SECONDS = 6;
+const BROWSE_SECONDS = 15;      // look for iPhones this long at most: on channel 6 they can take 10 s to answer
+const BROWSE_GRACE_MS = 1500;   // once one answers, wait this long for others, then show the list
 const SIGINT = 2;
 
 const DBUS_XML = `
@@ -73,6 +76,17 @@ function readLines(stream, onLine, onEnd) {
         next();
     });
     next();
+}
+
+// Closes a notification unless it's gone already (its banner expired, or the user closed it).
+function dismiss(n) {
+    if (!n._airdropGone)
+        n.destroy();
+}
+
+function setBody(n, body) {
+    if (!n._airdropGone)
+        n.body = body;
 }
 
 function spawn(argv, flags) {
@@ -184,14 +198,16 @@ export default class AirDropExtension extends Extension {
         }
     }
 
-    _notify(title, body, {urgency = MessageTray.Urgency.NORMAL, actions = [], transient = false} = {}) {
+    // All transient: shown as a banner, never kept in the notification list.
+    _notify(title, body, {urgency = MessageTray.Urgency.NORMAL, actions = []} = {}) {
         if (!this._source) {
             this._source = new MessageTray.Source({title: 'AirDrop', icon: this.icon});
             this._source.connect('destroy', () => { this._source = null; });
             Main.messageTray.add(this._source);
         }
         const n = new MessageTray.Notification({source: this._source, title, body, urgency,
-            isTransient: transient, gicon: this.icon});
+            isTransient: true, gicon: this.icon});
+        n.connect('destroy', () => { n._airdropGone = true; });
         for (const [label, cb] of actions)
             n.addAction(label, cb);
         this._source.addNotification(n);
@@ -242,7 +258,7 @@ export default class AirDropExtension extends Extension {
                 if (wasOn) {
                     this._stopReceiver();
                     this._sync();
-                    this._notify('AirDrop is off', 'Wi-Fi is back.', {transient: true});
+                    this._notify('AirDrop is off', 'Wi-Fi is back.');
                 }
             });
             this._sync();
@@ -290,10 +306,27 @@ export default class AirDropExtension extends Extension {
             if (this._receiving && !this._askNotification && !this._sending) {
                 this._stopAll();
                 this._sync();
-                this._notify('AirDrop is off', 'Transfer done. Wi-Fi is back.', {transient: true});
+                this._notify('AirDrop is off', 'Transfer done. Wi-Fi is back.');
             }
             return GLib.SOURCE_REMOVE;
         });
+    }
+
+    // After sending (and not receiving), keep the radio up a little for a follow-up send.
+    _lingerAfterSend() {
+        this._cancelLinger();
+        this._lingerTimer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, SEND_LINGER_SECONDS, () => {
+            this._lingerTimer = null;
+            if (!this._receiving && !this._sending)
+                this.stop();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _cancelLinger() {
+        if (this._lingerTimer)
+            GLib.source_remove(this._lingerTimer);
+        this._lingerTimer = null;
     }
 
     _cancelDone() {
@@ -304,6 +337,7 @@ export default class AirDropExtension extends Extension {
 
     _stopAll() {
         this._cancelDone();
+        this._cancelLinger();
         this._stopReceiver();
         if (this._radio) {
             const radio = this._radio;
@@ -318,7 +352,7 @@ export default class AirDropExtension extends Extension {
         this._stopAll();
         this._sync();
         if (wasOn)
-            this._notify('AirDrop is off', 'Wi-Fi is back.', {transient: true});
+            this._notify('AirDrop is off', 'Wi-Fi is back.');
     }
 
     // ---- receiving -------------------------------------------------------------------
@@ -381,7 +415,7 @@ export default class AirDropExtension extends Extension {
         });
         readLines(proc.get_stdout_pipe(), line => this._received(dir, line));
         this._notify('AirDrop is on', `Nearby iPhones see “${deviceName()}”. Files go to Downloads. ` +
-            `Wi-Fi is paused; AirDrop turns off by itself in ${ON_MINUTES} minutes.`, {transient: true});
+            `Wi-Fi is paused; AirDrop turns off by itself in ${ON_MINUTES} minutes.`);
         proc.wait_async(null, () => {
             if (this._receiver === proc) {
                 this._receiver = null;
@@ -434,7 +468,7 @@ export default class AirDropExtension extends Extension {
         });
         GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, ASK_SECONDS, () => {
             if (!answered)
-                n.destroy();
+                dismiss(n);
             return GLib.SOURCE_REMOVE;
         });
     }
@@ -486,12 +520,13 @@ export default class AirDropExtension extends Extension {
         if (!paths.length)
             return;
         this._sending++;
+        this._cancelLinger();
         const searching = this._notify('Looking for nearby iPhones…',
-            'On the iPhone, set AirDrop to “Everyone for 10 minutes”. Wi-Fi pauses meanwhile.', {transient: true});
+            'On the iPhone, set AirDrop to “Everyone for 10 minutes”. Wi-Fi pauses meanwhile.');
         try {
             await this._radioUp();
             const devices = await this._browse();
-            searching.destroy();
+            dismiss(searching);
             if (!devices.length) {
                 this._notify('No iPhones found', 'Open AirDrop on the iPhone, set it to “Everyone for 10 minutes”, and try again.');
                 return;
@@ -500,37 +535,51 @@ export default class AirDropExtension extends Extension {
             if (to)
                 await this._send(to, paths);
         } catch (e) {
-            searching.destroy();
+            dismiss(searching);
             this._notify('AirDrop could not send', e.message);
         } finally {
             this._sending--;
-            // Started just for sending: give Wi-Fi back right away.
-            if (!this._receiving && !this._sending)
-                this.stop();
+            // Started just for sending: give Wi-Fi back soon, unless another send follows.
+            if (!this._receiving && !this._sending && this._radio)
+                this._lingerAfterSend();
         }
     }
 
+    // Resolves with the names that answer, as soon as the first one has (plus a short grace
+    // for others), or with [] after BROWSE_SECONDS.
     _browse() {
         return new Promise((resolve, reject) => {
-            const proc = spawn(['owly', 'browse', '--name', deviceName(), '--seconds', String(BROWSE_SECONDS)],
-                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE);
-            proc.communicate_utf8_async(null, null, (p, res) => {
-                try {
-                    const [, out] = p.communicate_utf8_finish(res);
-                    const seen = new Set();
-                    const devices = [];
-                    for (const line of (out ?? '').split('\n')) {
-                        const m = line.match(/^\S+\s+(".*")\s+\(/);
-                        const name = m && unquote(m[1]);
-                        if (name && !seen.has(name)) {
-                            seen.add(name);
-                            devices.push(name);
-                        }
-                    }
-                    resolve(devices);
-                } catch (e) {
-                    reject(e);
+            let proc;
+            try {
+                proc = spawn(['owly', 'browse', '--name', deviceName(), '--seconds', String(BROWSE_SECONDS)],
+                    Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE);
+            } catch (e) {
+                reject(e);
+                return;
+            }
+            const seen = new Set();
+            const devices = [];
+            let grace = 0;
+            readLines(proc.get_stderr_pipe(), line => log(`browse: ${line}`));
+            readLines(proc.get_stdout_pipe(), line => {
+                const m = line.match(/^\S+\s+(".*")\s+\(/);
+                const name = m && unquote(m[1]);
+                if (!name || seen.has(name))
+                    return;
+                seen.add(name);
+                devices.push(name);
+                if (!grace) {
+                    grace = GLib.timeout_add(GLib.PRIORITY_DEFAULT, BROWSE_GRACE_MS, () => {
+                        grace = 0;
+                        try { proc.send_signal(SIGINT); } catch {}
+                        return GLib.SOURCE_REMOVE;
+                    });
                 }
+            }, () => {
+                if (grace)
+                    GLib.source_remove(grace);
+                log(`browse: found ${devices.length ? devices.join(', ') : 'nobody'}`);
+                resolve(devices);
             });
         });
     }
@@ -570,20 +619,22 @@ export default class AirDropExtension extends Extension {
         return new Promise(resolve => {
             const proc = spawn(['owly', 'send', '--name', deviceName(), '--to', to, ...paths],
                 Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE);
-            const status = this._notify(`Sending to ${to}…`, 'Waiting for them to accept.');
+            // Critical, so the banner stays up with the progress until the send ends.
+            const status = this._notify(`Sending to ${to}…`, 'Waiting for them to accept.',
+                {urgency: MessageTray.Urgency.CRITICAL});
             readLines(proc.get_stderr_pipe(), line => {
                 if (line === 'accepted')
-                    status.body = 'Accepted, sending…';
+                    setBody(status, 'Accepted, sending…');
                 const m = line.match(/(\d+) \/ (\d+) bytes/);
                 if (m)
-                    status.body = `Sending… ${Math.round(100 * m[1] / Math.max(1, m[2]))}%`;
+                    setBody(status, `Sending… ${Math.round(100 * m[1] / Math.max(1, m[2]))}%`);
             });
             let result = '';
             readLines(proc.get_stdout_pipe(), line => { result = line; });
             proc.wait_async(null, () => {
-                status.destroy();
+                dismiss(status);
                 if (result === 'delivered')
-                    this._notify(`Sent to ${to}`, paths.length === 1 ? GLib.path_get_basename(paths[0]) : `${paths.length} files`, {transient: true});
+                    this._notify(`Sent to ${to}`, paths.length === 1 ? GLib.path_get_basename(paths[0]) : `${paths.length} files`);
                 else if (result === 'declined')
                     this._notify(`${to} declined`, 'Nothing was sent.');
                 else

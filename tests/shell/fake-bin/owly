@@ -1,0 +1,36 @@
+#!/bin/bash
+# Stand-in for owly in the tests: no radio. $AIRDROP_FAKE/scenario picks how `browse` answers.
+LOG="$AIRDROP_FAKE/owly.log"
+t0=$(date +%s%N)
+say() { echo "$(( ($(date +%s%N) - t0) / 1000000 )) $*" >> "$LOG"; }
+# Waits until $1 tenths of a second after start (short sleeps so SIGINT lands right away).
+until_t() { while [ $(( ($(date +%s%N) - t0) / 100000000 )) -lt "$1" ]; do sleep 0.05; done; }
+phone() { printf '%-14s "%s" (fe80::%s%%awdl0)\n' "$1" "$2" "$1"; }
+case "$1" in
+    radio)
+        say "radio up"
+        echo "awdl0 is up" >&2
+        trap 'say "radio down"; echo "giving the radio back..." >&2; exit 0' INT TERM
+        while :; do sleep 0.1; done ;;
+    browse)
+        scenario=$(cat "$AIRDROP_FAKE/scenario")
+        secs=$(echo "$@" | sed -n 's/.*--seconds \([0-9]*\).*/\1/p')
+        trap 'say "browse $scenario stopped"; exit 130' INT
+        say "browse $scenario start seconds=$secs"
+        case "$scenario" in
+            slow)  until_t 90; phone abc1 "Sam's iPhone" ;;   # answers after 9 s
+            two)   until_t 30; phone abc1 "Sam's iPhone"; until_t 40; phone abc2 "iPad"
+                   until_t 60; phone abc3 "Late Phone" ;;      # 3 s after the first: too late
+            none)  until_t 10; echo "phone9: /Discover failed: timed out" >&2 ;;
+        esac
+        until_t $(( secs * 10 ))
+        say "browse $scenario ran out" ;;
+    send)
+        say "send start"
+        echo accepted >&2; sleep 1
+        echo "1000 / 2000 bytes" >&2; sleep 1
+        echo "2000 / 2000 bytes" >&2; echo delivered
+        say "send done" ;;
+    *)
+        exit 0 ;;
+esac

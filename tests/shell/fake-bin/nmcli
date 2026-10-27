@@ -1,0 +1,4 @@
+#!/bin/bash
+# Stand-in for nmcli in the tests: Wi-Fi is always connected, nothing is changed.
+[ "$1" = -t ] && echo "wlan0:wifi:connected"
+exit 0

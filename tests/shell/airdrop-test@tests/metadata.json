@@ -1,0 +1,1 @@
+{"uuid": "airdrop-test@tests", "name": "AirDrop test driver", "description": "Drives AirDrop in a headless test shell.", "shell-version": ["50"], "version": 1}

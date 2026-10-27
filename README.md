@@ -31,7 +31,7 @@ and safe as possible:
 
 - AirDrop only turns on when you turn it on.
 - After a transfer it **turns itself off** (15 seconds after the last file or link), and
-  after sending it turns off right away.
+  30 seconds after sending, so a second send right after finds the iPhone again quickly.
 - It **never stays on longer than 10 minutes.** The limit is enforced by Owly's own service,
   so Wi-Fi comes back even if GNOME Shell or a terminal goes away.
 - After AirDrop stops, it checks that Wi-Fi reconnected, and asks NetworkManager to reconnect

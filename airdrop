@@ -34,7 +34,7 @@ start_radio() {
 }
 pick_receiver() {
     echo "Looking for nearby iPhones (set AirDrop to \"Everyone for 10 minutes\")..."
-    owly browse --name "$NAME" --seconds 8
+    owly browse --name "$NAME" --seconds 15
     read -r -p "Send to (type the name, or Enter for the first one found): " TO
 }
 
